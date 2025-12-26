@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Iterable, Optional, Tuple
-
+import os
 import torch
 
 from sglang.srt.distributed import (
@@ -176,6 +176,8 @@ class MindSporeForCausalLM(torch.nn.Module):
             # MatMulAllReduce only support tp size in (1, 2, 4, 8)
             ms.set_context(graph_kernel_flags="--disable_pass=MatMulAllReduce")
 
+        self.is_radix_attn = os.environ.get("ENABLE_RADIX_ATTN", "0") == "1"
+
         arch = self.get_arch(self.config)
         self.model = arch(config=config, quant_config=quant_config)
 
@@ -190,7 +192,10 @@ class MindSporeForCausalLM(torch.nn.Module):
         mindspore_models = import_model_classes("sgl_mindspore.models")
 
         # Get arch from config
-        architectures = config.architectures
+        if self.is_radix_attn:
+            architectures = "Qwen3ForCausalLMRadix"
+        else:
+            architectures = config.architectures
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
@@ -223,7 +228,13 @@ class MindSporeForCausalLM(torch.nn.Module):
                 cache_ms = tensor_torch2ms(cache)
                 if cache_ms.ndim == 3:
                     cache_ms = mint.unsqueeze(cache_ms, 2)
-                if is_310p:
+
+                if self.is_radix_attn:
+                    cache_shape = cache.shape
+                    n_block, block_size, n_kv_heads, head_size = cache_shape
+                    cache_shape = (n_block * block_size, n_kv_heads * head_size)
+                    cache_list.append(cache_ms)
+                elif is_310p():
                     cache_list.append(format_cast(cache_ms, "nz"))
                 else:
                     cache_list.append(cache_ms)
