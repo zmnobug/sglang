@@ -219,13 +219,12 @@ class MindSporeForCausalLM(torch.nn.Module):
                     cache = forward_batch.token_to_kv_pool.get_key_buffer(i)
                 else:
                     cache = forward_batch.token_to_kv_pool.get_value_buffer(i)
-                cache_ms = tensor_torch2ms(cache)
-                if cache_ms.ndim == 3:
-                    cache_ms = mint.unsqueeze(cache_ms, 2)
-
                 if is_310p():
-                    cache_list.append(format_cast(cache_ms, "nz"))
+                    cache_list.append(cache)
                 else:
+                    cache_ms = tensor_torch2ms(cache)
+                    if cache_ms.ndim == 3:
+                        cache_ms = mint.unsqueeze(cache_ms, 2)
                     cache_list.append(cache_ms)
 
         if self.use_mla:

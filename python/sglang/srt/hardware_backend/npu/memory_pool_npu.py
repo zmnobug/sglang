@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch_npu
-
+import mindspore as ms
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.mem_cache.memory_pool import (
     MHATokenToKVPool,
@@ -10,6 +10,7 @@ from sglang.srt.mem_cache.memory_pool import (
     get_tensor_size_bytes,
 )
 from sglang.srt.utils import get_bool_env_var
+from sgl_mindspore.utils import is_310p
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -48,12 +49,44 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
             enable_kv_cache_copy=enable_kv_cache_copy,
         )
 
+    def _create_buffers_nz(self):
+        def create_kv_cache(kv_shape, dtype):
+            if len(kv_shape) != 4:
+                raise ValueError(f"Format_Cast op need kv_cache shape be"
+                                 f"(batch_size, num_heads, seq_len, head_dim),"
+                                 f"but got {len(kv_shape)} dimensions: {kv_shape}")
+            batch_size, num_heads, seq_len, head_dim = kv_shape
+            reshaped_for_nz = (batch_size, num_heads, seq_len * head_dim)
+            zeros_tensor = ms.mint.zeros(reshaped_for_nz, dtype=ms.float16)
+            return ms.ops.auto_generate.format_cast(zeros_tensor, 29)
+        
+        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            kv_shape =  (
+                    self.size // self.page_size + 1,
+                    self.page_size,
+                    self.head_num,
+                    self.head_dim,
+                )
+            self.k_buffer = [
+                create_kv_cache(kv_shape, self.store_dtype)
+                for _ in range(self.layer_num)
+            ]
+            self.v_buffer = [
+                create_kv_cache(kv_shape, self.store_dtype)
+                for _ in range(self.layer_num)
+            ]
+            self.kv_buffer = (self.k_buffer, self.v_buffer)
+
     def _create_buffers(self):
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             # [size, head_num, head_dim] for each layer
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
             # Continuous memory improves the efficiency of Ascend`s transmission backend,
             # while other backends remain unchanged.
+            if is_310p:
+                self._create_buffers_nz()
+                return
+                
             self.kv_buffer = torch.zeros(
                 (
                     2,
